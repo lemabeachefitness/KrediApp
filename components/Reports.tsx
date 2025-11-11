@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { Card, Button, Modal, formatDateForBrasilia, getTodayInBrasilia } from './Shared';
 import type { Loan, Client, Transaction, Account, InstallmentDetail, DeletionRecord } from '../types';
-import { CheckCircleIcon, TrashIcon, UserCircleIcon, BanknoteIcon } from './Icons';
+import { CheckCircleIcon, TrashIcon, UserCircleIcon, BanknoteIcon, FileTextIcon } from './Icons';
 
 interface ReportsPageProps {
   loans: Loan[];
@@ -14,6 +14,105 @@ interface ReportsPageProps {
 const formatCurrency = (value: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
 
 const inputStyle = "w-full sm:w-auto mt-1 px-3 py-2 text-gray-800 bg-white border border-gray-300 rounded-md dark:bg-gray-900 dark:text-gray-200 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-primary-500 shadow-sm";
+
+/**
+ * Creates a new window and prints the content of a referenced component with proper styling.
+ * It forces a light theme for readability and consistency in the printed output.
+ * @param reportRef - A React ref pointing to the HTML element to be printed.
+ * @param title - The title of the document to be printed.
+ */
+const printReport = (reportRef: React.RefObject<HTMLDivElement>, title: string) => {
+    const printContent = reportRef.current;
+    if (!printContent) return;
+
+    const printWindow = window.open('', '_blank', 'height=800,width=1000');
+    if (!printWindow) {
+        alert('Não foi possível abrir a janela de impressão. Por favor, desative o bloqueador de pop-ups.');
+        return;
+    }
+
+    printWindow.document.write(`<html><head><title>${title}</title>`);
+
+    // Attempt to copy all stylesheets from the main document to the print window
+    Array.from(document.styleSheets).forEach(styleSheet => {
+        try {
+            if (styleSheet.href) {
+                printWindow.document.write(`<link rel="stylesheet" href="${styleSheet.href}">`);
+            } else if (styleSheet.cssRules) {
+                const style = printWindow.document.createElement('style');
+                style.textContent = Array.from(styleSheet.cssRules).map(rule => rule.cssText).join('\n');
+                printWindow.document.head.appendChild(style);
+            }
+        } catch (e) {
+            console.warn('Could not read stylesheet for printing (this is common for cross-origin stylesheets):', e);
+        }
+    });
+
+    // Add specific override styles for a clean, light-themed print layout
+    printWindow.document.write(`
+        <style>
+            body { 
+                background-color: #ffffff !important; 
+                color: #000000 !important;
+                padding: 20px; 
+                font-family: Arial, sans-serif;
+                -webkit-print-color-adjust: exact;
+                color-adjust: exact;
+            }
+            /* Force light-mode colors and remove dark-mode specific styles */
+            .dark, .dark body, .dark div, .dark table, .dark tbody, .dark thead, .dark tr, .dark td, .dark th,
+            .dark .bg-gray-800, .dark .bg-gray-700\\/50, .dark .bg-indigo-900\\/30, .dark .bg-white {
+                background-color: #ffffff !important;
+                color: #000000 !important;
+                border-color: #dee2e6 !important;
+            }
+            .dark .bg-gray-50 {
+                 background-color: #f9fafb !important;
+            }
+            /* Ensure text colors are high-contrast and not inherited from dark mode */
+            p, span, h1, h2, h3, h4, th, td, div {
+                color: #000000 !important;
+            }
+            .text-red-500, .text-red-600 { color: #dc2626 !important; }
+            .text-green-500, .text-green-600 { color: #16a34a !important; }
+            .text-yellow-500, .text-yellow-600 { color: #d97706 !important; }
+            
+            table { 
+                width: 100%; 
+                border-collapse: collapse; 
+                margin-bottom: 1rem; 
+                font-size: 0.9rem;
+            }
+            th, td { 
+                border: 1px solid #dee2e6 !important; 
+                padding: 0.5rem; 
+                text-align: left; 
+            }
+            thead th { 
+                background-color: #f8f9fa !important; 
+                font-weight: bold;
+            }
+            h1, h2, h3, h4 {
+                margin-top: 1.5rem;
+                margin-bottom: 0.5rem;
+            }
+        </style>
+    `);
+    
+    printWindow.document.write('</head><body>');
+    printWindow.document.write(`<h1>${title}</h1>`);
+    printWindow.document.write(printContent.innerHTML);
+    printWindow.document.write('</body></html>');
+    printWindow.document.close();
+
+    // Use a timeout to ensure styles are loaded before triggering print
+    setTimeout(() => {
+        printWindow.focus();
+        printWindow.print();
+        printWindow.close();
+    }, 500);
+};
+
 
 /**
  * Calculates the current total outstanding balance for a given loan,
@@ -65,39 +164,122 @@ const calculateCurrentOutstandingBalance = (loan: Loan): number => {
 // Reusable Filter Component
 const ReportFilters: React.FC<{
     clients: Client[];
-    onFilterChange: (filters: { clientId: string; startDate: string; endDate: string }) => void;
+    onFilterChange: (filters: { clientIds: string[]; startDate: string; endDate: string }) => void;
     showClientFilter?: boolean;
     showDateFilter?: boolean;
 }> = ({ clients, onFilterChange, showClientFilter = true, showDateFilter = true }) => {
-    const [clientId, setClientId] = useState('all');
+    const [isClientDropdownOpen, setIsClientDropdownOpen] = useState(false);
+    const [selectedClientIds, setSelectedClientIds] = useState<string[]>([]);
+    const clientDropdownRef = useRef<HTMLDivElement>(null);
+
+    const [period, setPeriod] = useState('all');
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
 
     useEffect(() => {
-        onFilterChange({ clientId, startDate, endDate });
-    }, [clientId, startDate, endDate]);
+        const handleClickOutside = (event: MouseEvent) => {
+            if (clientDropdownRef.current && !clientDropdownRef.current.contains(event.target as Node)) {
+                setIsClientDropdownOpen(false);
+            }
+        };
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, [clientDropdownRef]);
+
+    useEffect(() => {
+        const today = new Date();
+        const y = today.getFullYear();
+        const m = today.getMonth();
+
+        const formatDate = (date: Date) => date.toISOString().split('T')[0];
+
+        if (period === 'currentMonth') {
+            setStartDate(formatDate(new Date(y, m, 1)));
+            setEndDate(formatDate(new Date(y, m + 1, 0)));
+        } else if (period === 'lastMonth') {
+            setStartDate(formatDate(new Date(y, m - 1, 1)));
+            setEndDate(formatDate(new Date(y, m, 0)));
+        } else if (period === 'thisYear') {
+            setStartDate(formatDate(new Date(y, 0, 1)));
+            setEndDate(formatDate(new Date(y, 11, 31)));
+        } else if (period === 'all') {
+            setStartDate('');
+            setEndDate('');
+        }
+    }, [period]);
+
+    useEffect(() => {
+        onFilterChange({ clientIds: selectedClientIds, startDate, endDate });
+    }, [selectedClientIds, startDate, endDate, onFilterChange]);
+
+    const handleClientToggle = (clientId: string) => {
+        setSelectedClientIds(prev =>
+            prev.includes(clientId) ? prev.filter(id => id !== clientId) : [...prev, clientId]
+        );
+    };
+
+    const getClientButtonLabel = () => {
+        if (selectedClientIds.length === 0) return "Todos os Clientes";
+        if (selectedClientIds.length === 1) return clients.find(c => c.id === selectedClientIds[0])?.name || "1 cliente";
+        return `${selectedClientIds.length} clientes selecionados`;
+    };
 
     return (
         <div className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg mb-6 flex flex-col sm:flex-row gap-4 items-center flex-wrap">
             {showClientFilter && (
-                <div>
-                    <label htmlFor="clientFilter" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Filtrar por Cliente</label>
-                    <select id="clientFilter" value={clientId} onChange={e => setClientId(e.target.value)} className={inputStyle}>
-                        <option value="all">Todos os Clientes</option>
-                        {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select>
+                <div className="relative" ref={clientDropdownRef}>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Filtrar por Cliente(s)</label>
+                    <button type="button" onClick={() => setIsClientDropdownOpen(!isClientDropdownOpen)} className={`${inputStyle} text-left min-w-[200px]`}>
+                        {getClientButtonLabel()}
+                    </button>
+                    {isClientDropdownOpen && (
+                        <div className="absolute z-10 mt-1 w-64 bg-white dark:bg-gray-800 rounded-md shadow-lg max-h-60 overflow-y-auto">
+                            <ul className="py-1">
+                                <li className="px-3 py-2">
+                                    <button type="button" onClick={() => setSelectedClientIds([])} className="w-full text-left text-xs text-blue-600 hover:underline">Limpar seleção</button>
+                                </li>
+                                {clients.map(client => (
+                                    <li key={client.id}>
+                                        <label className="flex items-center px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedClientIds.includes(client.id)}
+                                                onChange={() => handleClientToggle(client.id)}
+                                                className="h-4 w-4 text-primary-600 border-gray-300 rounded focus:ring-primary-500"
+                                            />
+                                            <span className="ml-3">{client.name}</span>
+                                        </label>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
                 </div>
             )}
             {showDateFilter && (
                 <>
                     <div>
-                        <label htmlFor="startDate" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Data Inicial</label>
-                        <input type="date" id="startDate" value={startDate} onChange={e => setStartDate(e.target.value)} className={inputStyle} />
+                        <label htmlFor="periodFilter" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Período</label>
+                        <select id="periodFilter" value={period} onChange={e => setPeriod(e.target.value)} className={inputStyle}>
+                            <option value="all">Todo o Período</option>
+                            <option value="currentMonth">Mês Atual</option>
+                            <option value="lastMonth">Último Mês</option>
+                            <option value="thisYear">Ano Atual</option>
+                            <option value="custom">Personalizado</option>
+                        </select>
                     </div>
-                    <div>
-                        <label htmlFor="endDate" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Data Final</label>
-                        <input type="date" id="endDate" value={endDate} onChange={e => setEndDate(e.target.value)} className={inputStyle} />
-                    </div>
+                    {period === 'custom' && (
+                        <>
+                            <div>
+                                <label htmlFor="startDate" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Data Inicial</label>
+                                <input type="date" id="startDate" value={startDate} onChange={e => setStartDate(e.target.value)} className={inputStyle} />
+                            </div>
+                            <div>
+                                <label htmlFor="endDate" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Data Final</label>
+                                <input type="date" id="endDate" value={endDate} onChange={e => setEndDate(e.target.value)} className={inputStyle} />
+                            </div>
+                        </>
+                    )}
                 </>
             )}
         </div>
@@ -106,7 +288,7 @@ const ReportFilters: React.FC<{
 
 
 export const ReportsPage: React.FC<ReportsPageProps> = ({ loans, clients, transactions, accounts, deletionHistory }) => {
-    const [activeReport, setActiveReport] = useState<null | 'delinquency' | 'cashflow' | 'profitability' | 'byClient' | 'installments' | 'deletionHistory' | 'modalitySummary'>(null);
+    const [activeReport, setActiveReport] = useState<null | 'delinquency' | 'cashflow' | 'profitability' | 'byClient' | 'installments' | 'deletionHistory' | 'modalitySummary' | 'accountStatement'>(null);
 
     return (
         <div className="space-y-8">
@@ -121,6 +303,10 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({ loans, clients, transa
                  <Card title="Fluxo de Caixa Detalhado">
                     <p className="text-gray-600 dark:text-gray-400 text-sm mb-4">Acompanhe todas as entradas e saídas, com opção de filtro por conta.</p>
                     <Button onClick={() => setActiveReport('cashflow')} className="w-full">Gerar Relatório</Button>
+                 </Card>
+                 <Card title="Extrato por Conta">
+                    <p className="text-gray-600 dark:text-gray-400 text-sm mb-4">Veja o extrato detalhado de cada conta, com saldo inicial, transações e saldo final.</p>
+                    <Button onClick={() => setActiveReport('accountStatement')} className="w-full">Gerar Relatório</Button>
                  </Card>
                  <Card title="Controle de Parcelas">
                     <p className="text-gray-600 dark:text-gray-400 text-sm mb-4">Relatório de rastreabilidade de parcelas pagas, pendentes e atrasadas.</p>
@@ -191,6 +377,13 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({ loans, clients, transa
                 onClose={() => setActiveReport(null)}
                 history={deletionHistory}
             />
+            
+            <AccountStatementReportModal
+                isOpen={activeReport === 'accountStatement'}
+                onClose={() => setActiveReport(null)}
+                accounts={accounts}
+                transactions={transactions}
+            />
 
         </div>
     );
@@ -199,7 +392,7 @@ export const ReportsPage: React.FC<ReportsPageProps> = ({ loans, clients, transa
 
 const DelinquencyReportModal: React.FC<{isOpen: boolean, onClose: () => void, loans: Loan[], clients: Client[]}> = ({isOpen, onClose, loans, clients}) => {
     const reportRef = useRef<HTMLDivElement>(null);
-    const [filters, setFilters] = useState({ clientId: 'all', startDate: '', endDate: '' });
+    const [filters, setFilters] = useState({ clientIds: [] as string[], startDate: '', endDate: '' });
 
     const overdueItems = useMemo(() => {
         const today = getTodayInBrasilia();
@@ -213,7 +406,7 @@ const DelinquencyReportModal: React.FC<{isOpen: boolean, onClose: () => void, lo
                 loan.installments_details.forEach(inst => {
                     const dueDate = new Date(inst.due_date.split('T')[0] + 'T00:00:00');
                     if (inst.status === 'pending' && dueDate < today) {
-                        const daysOverdue = Math.max(0, Math.floor((today.getTime() - dueDate.getTime()) / (1000 * 3600 * 24)));
+                        const daysOverdue = Math.max(0, Math.floor((today.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)));
                         // Apply the parent loan's daily fee to the overdue installment
                         const lateFee = daysOverdue * loan.daily_late_fee_amount;
                         items.push({
@@ -234,7 +427,7 @@ const DelinquencyReportModal: React.FC<{isOpen: boolean, onClose: () => void, lo
             else {
                 const dueDate = new Date(loan.due_date.split('T')[0] + 'T00:00:00');
                 if (dueDate < today) {
-                    const daysOverdue = Math.max(0, Math.floor((today.getTime() - dueDate.getTime()) / (1000 * 3600 * 24)));
+                    const daysOverdue = Math.max(0, Math.floor((today.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)));
                     const lateFee = daysOverdue * loan.daily_late_fee_amount;
                     items.push({
                         id: loan.id,
@@ -253,7 +446,7 @@ const DelinquencyReportModal: React.FC<{isOpen: boolean, onClose: () => void, lo
 
         // Apply filters
         return items.filter(item => {
-            const clientMatch = filters.clientId === 'all' || item.clientId === filters.clientId;
+            const clientMatch = filters.clientIds.length === 0 || filters.clientIds.includes(item.clientId);
             const itemDueDate = new Date(item.dueDate.split('T')[0] + 'T00:00:00');
             const dateMatch = (!filters.startDate || itemDueDate >= new Date(filters.startDate + 'T00:00:00')) &&
                               (!filters.endDate || itemDueDate <= new Date(filters.endDate + 'T23:59:59'));
@@ -275,17 +468,7 @@ const DelinquencyReportModal: React.FC<{isOpen: boolean, onClose: () => void, lo
         })).sort((a,b) => b.total - a.total);
     }, [overdueItems, clients]);
     
-    const handlePrint = () => {
-        const printContent = reportRef.current;
-        if (printContent) {
-            const WinPrint = window.open('', '', 'left=0,top=0,width=800,height=900,toolbar=0,scrollbars=0,status=0');
-            WinPrint?.document.write(`<html><head><title>Relatório de Inadimplência</title><style>body{font-family:sans-serif;}.print-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; } .print-table th, .print-table td { border: 1px solid #ddd; padding: 8px; text-align: left; } .print-table th { background-color: #f2f2f2; } h3 { font-size: 1.2em; margin-bottom: 10px; }</style></head><body>${printContent.innerHTML}</body></html>`);
-            WinPrint?.document.close();
-            WinPrint?.focus();
-            WinPrint?.print();
-            WinPrint?.close();
-        }
-    }
+    const handlePrint = () => printReport(reportRef, 'Relatório de Inadimplência');
     
     const thStyle = "px-2 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider dark:text-gray-300";
 
@@ -380,111 +563,213 @@ const DelinquencyReportModal: React.FC<{isOpen: boolean, onClose: () => void, lo
 }
 
 interface DailyFlowGroup {
-    transactions: (Transaction & {credit: number; debit: number})[];
+    transactions: (Transaction & {credit: number; debit: number; runningBalance: number})[];
     dailyCredit: number;
     dailyDebit: number;
     netChange: number;
+    startOfDayBalance: number;
+    endOfDayBalance: number;
 }
 const CashFlowReportModal: React.FC<{isOpen: boolean, onClose: () => void, transactions: Transaction[], accounts: Account[]}> = ({isOpen, onClose, transactions, accounts}) => {
     const reportRef = useRef<HTMLDivElement>(null);
     const [selectedAccountId, setSelectedAccountId] = useState('all');
-    
-    const { groupedItems, totalCredit, totalDebit, netTotal } = useMemo(() => {
-        const filteredTransactions = selectedAccountId === 'all' ? transactions : transactions.filter(t => t.accountId === selectedAccountId);
+    const [period, setPeriod] = useState('all');
+    const [startDate, setStartDate] = useState('');
+    const [endDate, setEndDate] = useState('');
 
-        const itemsWithCreditDebit = filteredTransactions.map(t => ({
-            ...t,
-            credit: t.type === 'credit' ? t.amount : 0,
-            debit: t.type === 'debit' ? t.amount : 0,
-        }));
+    useEffect(() => {
+        const today = new Date();
+        const y = today.getFullYear();
+        const m = today.getMonth();
+        const formatDate = (date: Date) => date.toISOString().split('T')[0];
+
+        if (period === 'currentMonth') {
+            setStartDate(formatDate(new Date(y, m, 1)));
+            setEndDate(formatDate(new Date(y, m + 1, 0)));
+        } else if (period === 'lastMonth') {
+            setStartDate(formatDate(new Date(y, m - 1, 1)));
+            setEndDate(formatDate(new Date(y, m, 0)));
+        } else if (period === 'thisYear') {
+            setStartDate(formatDate(new Date(y, 0, 1)));
+            setEndDate(formatDate(new Date(y, 11, 31)));
+        } else if (period === 'all') {
+            setStartDate('');
+            setEndDate('');
+        }
+    }, [period]);
+    
+    const { groupedItems, totalCredit, totalDebit, netTotal, totalInitialBalance } = useMemo(() => {
+        const accountsToConsider = selectedAccountId === 'all' 
+            ? accounts 
+            : accounts.filter(a => a.id === selectedAccountId);
         
-        itemsWithCreditDebit.sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+        const accountIdsToConsider = new Set(accountsToConsider.map(a => a.id));
         
-        const grouped = itemsWithCreditDebit.reduce((acc: Record<string, DailyFlowGroup>, item) => {
+        const dateFilteredTransactions = transactions.filter(t => {
+            const dateMatch = (!startDate || new Date(t.date) >= new Date(startDate + 'T00:00:00')) &&
+                              (!endDate || new Date(t.date) <= new Date(endDate + 'T23:59:59'));
+            return dateMatch;
+        });
+
+        const totalInitialBalance = accountsToConsider.reduce((sum, acc) => {
+            const previousTransactions = transactions.filter(t => 
+                t.accountId === acc.id && new Date(t.date) < new Date(startDate + 'T00:00:00')
+            );
+            const balanceBeforePeriod = previousTransactions.reduce((s, t) => s + (t.type === 'credit' ? t.amount : -t.amount), acc.initial_balance);
+            return sum + balanceBeforePeriod;
+        }, 0);
+        
+        const filteredTransactions = dateFilteredTransactions.filter(t => accountIdsToConsider.has(t.accountId));
+        const sortedTransactions = [...filteredTransactions].sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+        let runningBalance = totalInitialBalance;
+        const transactionsWithBalance = sortedTransactions.map(t => {
+            const credit = t.type === 'credit' ? t.amount : 0;
+            const debit = t.type === 'debit' ? t.amount : 0;
+            runningBalance += credit - debit;
+            return { ...t, credit, debit, runningBalance };
+        });
+
+        const grouped = transactionsWithBalance.reduce((acc: Record<string, DailyFlowGroup>, item, index, arr) => {
             const dateKey = formatDateForBrasilia(item.date);
             if (!acc[dateKey]) {
-                acc[dateKey] = { transactions: [], dailyCredit: 0, dailyDebit: 0, netChange: 0 };
+                const isFirstTransactionOfDay = arr.findIndex(t => formatDateForBrasilia(t.date) === dateKey) === index;
+                const startOfDayBalance = isFirstTransactionOfDay 
+                    ? (arr[index - 1]?.runningBalance ?? totalInitialBalance)
+                    : acc[dateKey].startOfDayBalance;
+
+                acc[dateKey] = { 
+                    transactions: [], 
+                    dailyCredit: 0, 
+                    dailyDebit: 0, 
+                    netChange: 0,
+                    startOfDayBalance: startOfDayBalance,
+                    endOfDayBalance: 0 
+                };
             }
             acc[dateKey].transactions.push(item);
             acc[dateKey].dailyCredit += item.credit;
             acc[dateKey].dailyDebit += item.debit;
             acc[dateKey].netChange = acc[dateKey].dailyCredit - acc[dateKey].dailyDebit;
+            acc[dateKey].endOfDayBalance = item.runningBalance;
             return acc;
         }, {} as Record<string, DailyFlowGroup>);
+        
+        const sortedGroupedItems = Object.entries(grouped).sort((a, b) => {
+            const dateA = new Date(a[0].split('/').reverse().join('-'));
+            const dateB = new Date(b[0].split('/').reverse().join('-'));
+            return dateB.getTime() - dateA.getTime();
+        });
         
         const totalCredit = filteredTransactions.reduce((sum, i) => sum + (i.type === 'credit' ? i.amount : 0), 0);
         const totalDebit = filteredTransactions.reduce((sum, i) => sum + (i.type === 'debit' ? i.amount : 0), 0);
 
-        return { groupedItems: Object.entries(grouped), totalCredit, totalDebit, netTotal: totalCredit - totalDebit };
-    }, [transactions, selectedAccountId]);
+        return { groupedItems: sortedGroupedItems, totalCredit, totalDebit, netTotal: totalCredit - totalDebit, totalInitialBalance };
+    }, [transactions, accounts, selectedAccountId, startDate, endDate]);
 
-    const handlePrint = () => {
-        const printContent = reportRef.current;
-        if (printContent) {
-            const WinPrint = window.open('', '', 'left=0,top=0,width=800,height=900,toolbar=0,scrollbars=0,status=0');
-            WinPrint?.document.write(`<html><head><title>Fluxo de Caixa</title><style>body{font-family:sans-serif;}.print-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; } .print-table th, .print-table td { border: 1px solid #ddd; padding: 8px; text-align: left; } .print-table th { background-color: #f2f2f2; } h3 { font-size: 1.2em; margin-bottom: 10px; }</style></head><body>${printContent.innerHTML}</body></html>`);
-            WinPrint?.document.close();
-            WinPrint?.focus();
-            WinPrint?.print();
-            WinPrint?.close();
-        }
-    }
+
+    const handlePrint = () => printReport(reportRef, 'Relatório de Fluxo de Caixa');
     
     return (
         <Modal isOpen={isOpen} onClose={onClose} title="Fluxo de Caixa Detalhado" size='2xl' footer={
              <div className="flex justify-between items-center w-full">
                  <div className="text-sm">
-                    <span className="text-gray-500 dark:text-gray-400">Total do Período: </span>
+                    <span className="text-gray-500 dark:text-gray-400">Total Líquido do Período: </span>
                     <span className={`font-bold ${netTotal >= 0 ? 'text-green-600' : 'text-red-600'}`}>{formatCurrency(netTotal)}</span>
                  </div>
                 <Button onClick={handlePrint}>Imprimir Relatório</Button>
             </div>
         }>
-            <div className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg mb-6">
-                <label htmlFor="accountFilter" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Filtrar por conta</label>
-                <select id="accountFilter" value={selectedAccountId} onChange={e => setSelectedAccountId(e.target.value)} className={inputStyle}>
-                    <option value="all">Todas as Contas</option>
-                    {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
-                </select>
+            <div className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg mb-6 flex flex-col sm:flex-row gap-4 items-center flex-wrap">
+                <div>
+                    <label htmlFor="accountFilter" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Filtrar por conta</label>
+                    <select id="accountFilter" value={selectedAccountId} onChange={e => setSelectedAccountId(e.target.value)} className={inputStyle}>
+                        <option value="all">Todas as Contas</option>
+                        {accounts.map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
+                    </select>
+                </div>
+                <div>
+                    <label htmlFor="periodFilter" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Período</label>
+                    <select id="periodFilter" value={period} onChange={e => setPeriod(e.target.value)} className={inputStyle}>
+                        <option value="all">Todo o Período</option>
+                        <option value="currentMonth">Mês Atual</option>
+                        <option value="lastMonth">Último Mês</option>
+                        <option value="thisYear">Ano Atual</option>
+                        <option value="custom">Personalizado</option>
+                    </select>
+                </div>
+                {period === 'custom' && (
+                    <>
+                        <div>
+                            <label htmlFor="startDate" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Data Inicial</label>
+                            <input type="date" id="startDate" value={startDate} onChange={e => setStartDate(e.target.value)} className={inputStyle} />
+                        </div>
+                        <div>
+                            <label htmlFor="endDate" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Data Final</label>
+                            <input type="date" id="endDate" value={endDate} onChange={e => setEndDate(e.target.value)} className={inputStyle} />
+                        </div>
+                    </>
+                )}
             </div>
              <div className="printable-report space-y-4" ref={reportRef}>
+                 <div className="rounded-lg bg-indigo-50 dark:bg-indigo-900/30 p-3 flex justify-between items-center">
+                    <h4 className="font-bold text-indigo-800 dark:text-indigo-200">Saldo Inicial do Período</h4>
+                    <span className="font-bold text-lg text-indigo-800 dark:text-indigo-200">{formatCurrency(totalInitialBalance)}</span>
+                </div>
                 {groupedItems.map(([date, group]) => (
                      <div key={date} className="rounded-lg bg-gray-50 dark:bg-gray-700/50 p-3">
-                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center pb-2 mb-2 border-b border-gray-200 dark:border-gray-600">
-                             <h4 className="font-bold text-gray-800 dark:text-gray-100 text-sm sm:text-base">{date}</h4>
-                             <div className='text-xs text-right space-x-2 sm:space-x-4 mt-1 sm:mt-0'>
+                        <div className="pb-2 mb-2 border-b border-gray-200 dark:border-gray-600">
+                            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center">
+                                <h4 className="font-bold text-gray-800 dark:text-gray-100 text-sm sm:text-base">{date}</h4>
+                                <div className="text-xs sm:text-sm text-gray-600 dark:text-gray-300 mt-1 sm:mt-0">
+                                    Saldo Inicial Dia: <span className="font-semibold">{formatCurrency(group.startOfDayBalance)}</span>
+                                </div>
+                            </div>
+                            <div className='text-xs text-right space-x-2 sm:space-x-4 mt-1'>
                                 <span className='text-green-600'>Créditos: {formatCurrency(group.dailyCredit)}</span>
                                 <span className='text-red-600'>Débitos: {formatCurrency(group.dailyDebit)}</span>
                                 <span className={`font-semibold ${group.netChange >= 0 ? 'text-gray-700 dark:text-gray-300' : 'text-red-500'}`}>
-                                    Líquido Dia: {formatCurrency(group.netChange)}
+                                    Líquido: {formatCurrency(group.netChange)}
                                 </span>
                             </div>
                         </div>
+
                         <div className='space-y-2'>
                         {group.transactions.map((item, index) => (
                              <div key={index} className="flex justify-between items-center text-sm pl-2">
-                                 <span className='truncate pr-2'>{item.description}</span>
-                                 <span className={`flex-shrink-0 ${item.credit > item.debit ? 'text-green-500' : 'text-red-500'}`}>
-                                     {formatCurrency(item.credit > item.debit ? item.credit : -item.debit)}
+                                 <div className='flex-grow truncate pr-2'>
+                                     <span>{item.description}</span>
+                                     {selectedAccountId === 'all' && (
+                                         <span className='text-xs text-gray-400 ml-2'>({accounts.find(a=>a.id === item.accountId)?.name})</span>
+                                     )}
+                                 </div>
+                                 <span className={`flex-shrink-0 font-medium ${item.credit > 0 ? 'text-green-500' : 'text-red-500'}`}>
+                                     {formatCurrency(item.credit > 0 ? item.credit : -item.debit)}
                                  </span>
                              </div>
                         ))}
                         </div>
+                         <div className="flex justify-end items-center mt-2 pt-2 border-t border-gray-200 dark:border-gray-600">
+                            <div className="text-xs sm:text-sm text-gray-600 dark:text-gray-300">
+                                Saldo Final do Dia: <span className="font-bold text-base text-gray-800 dark:text-gray-200">{formatCurrency(group.endOfDayBalance)}</span>
+                            </div>
+                        </div>
                     </div>
                 ))}
-                {groupedItems.length === 0 && <p className="text-center py-4 text-gray-500">Nenhuma movimentação encontrada.</p>}
+                {groupedItems.length === 0 && <p className="text-center py-4 text-gray-500">Nenhuma movimentação encontrada para os filtros selecionados.</p>}
             </div>
         </Modal>
     );
 }
 
 const ProfitabilityReportModal: React.FC<{isOpen: boolean, onClose: () => void, loans: Loan[], clients: Client[]}> = ({isOpen, onClose, loans, clients}) => {
-    const [filters, setFilters] = useState({ clientId: 'all', startDate: '', endDate: '' });
+    const reportRef = useRef<HTMLDivElement>(null);
+    const [filters, setFilters] = useState({ clientIds: [] as string[], startDate: '', endDate: '' });
     
     const summary = useMemo(() => {
         const filteredLoans = loans.filter(l => {
             if (l.is_archived) return false;
-            const clientMatch = filters.clientId === 'all' || l.clientId === filters.clientId;
+            const clientMatch = filters.clientIds.length === 0 || filters.clientIds.includes(l.clientId);
             const dateMatch = (!filters.startDate || new Date(l.date) >= new Date(filters.startDate + 'T00:00:00')) &&
                               (!filters.endDate || new Date(l.date) <= new Date(filters.endDate + 'T23:59:59'));
             return clientMatch && dateMatch;
@@ -498,6 +783,8 @@ const ProfitabilityReportModal: React.FC<{isOpen: boolean, onClose: () => void, 
         return { totalCapitalLent, totalCapitalReturned, netProfit, profitability, totalLoans: filteredLoans.length, paidLoansCount: paidLoans.length };
     }, [loans, filters]);
 
+    const handlePrint = () => printReport(reportRef, 'Relatório de Rentabilidade');
+
     const SummaryCard: React.FC<{title: string; value: string; description: string}> = ({title, value, description}) => (
         <div className='p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg'>
             <h4 className='text-sm text-gray-500 dark:text-gray-400'>{title}</h4>
@@ -507,9 +794,13 @@ const ProfitabilityReportModal: React.FC<{isOpen: boolean, onClose: () => void, 
     )
 
     return (
-        <Modal isOpen={isOpen} onClose={onClose} title="Relatório de Rentabilidade" size="2xl">
+        <Modal isOpen={isOpen} onClose={onClose} title="Relatório de Rentabilidade" size="2xl" footer={
+             <div className="flex justify-end">
+                <Button onClick={handlePrint}>Imprimir Relatório</Button>
+            </div>
+        }>
             <ReportFilters clients={clients} onFilterChange={setFilters} />
-            <div className='space-y-4'>
+            <div className='space-y-4 printable-report' ref={reportRef}>
                 <div className='grid grid-cols-1 sm:grid-cols-2 gap-4'>
                     <SummaryCard title="Total Emprestado" value={formatCurrency(summary.totalCapitalLent)} description={`Baseado em ${summary.totalLoans} empréstimos totais`} />
                     <SummaryCard title="Total Recebido (Quitados)" value={formatCurrency(summary.totalCapitalReturned)} description={`De ${summary.paidLoansCount} empréstimos quitados`} />
@@ -525,7 +816,7 @@ const ProfitabilityReportModal: React.FC<{isOpen: boolean, onClose: () => void, 
 
 const LoansByClientReportModal: React.FC<{isOpen: boolean, onClose: () => void, loans: Loan[], clients: Client[]}> = ({isOpen, onClose, loans, clients}) => {
     const reportRef = useRef<HTMLDivElement>(null);
-    const [filters, setFilters] = useState({ clientId: 'all', startDate: '', endDate: '' });
+    const [filters, setFilters] = useState({ clientIds: [] as string[], startDate: '', endDate: '' });
 
     const clientLoanSummary = useMemo(() => {
         const filteredLoans = loans.filter(l => {
@@ -536,8 +827,8 @@ const LoansByClientReportModal: React.FC<{isOpen: boolean, onClose: () => void, 
         });
 
         let clientsToReportOn = clients;
-        if (filters.clientId !== 'all') {
-            clientsToReportOn = clients.filter(c => c.id === filters.clientId);
+        if (filters.clientIds.length > 0) {
+            clientsToReportOn = clients.filter(c => filters.clientIds.includes(c.id));
         }
 
         const summary = clientsToReportOn.map(client => {
@@ -560,17 +851,7 @@ const LoansByClientReportModal: React.FC<{isOpen: boolean, onClose: () => void, 
         return summary.filter(Boolean).sort((a,b) => (b?.totalOutstanding || 0) - (a?.totalOutstanding || 0)) as NonNullable<typeof summary[0]>[];
     }, [loans, clients, filters]);
 
-     const handlePrint = () => {
-        const printContent = reportRef.current;
-        if (printContent) {
-            const WinPrint = window.open('', '', 'left=0,top=0,width=800,height=900,toolbar=0,scrollbars=0,status=0');
-            WinPrint?.document.write(`<html><head><title>Relatório de Empréstimos por Cliente</title><style>body{font-family:sans-serif;}.print-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; } .print-table th, .print-table td { border: 1px solid #ddd; padding: 8px; text-align: left; } .print-table th { background-color: #f2f2f2; } h3 { font-size: 1.2em; margin-bottom: 10px; }</style></head><body>${printContent.innerHTML}</body></html>`);
-            WinPrint?.document.close();
-            WinPrint?.focus();
-            WinPrint?.print();
-            WinPrint?.close();
-        }
-    }
+     const handlePrint = () => printReport(reportRef, 'Relatório de Empréstimos por Cliente');
     
     const thStyle = "px-2 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider dark:text-gray-300";
 
@@ -638,7 +919,7 @@ type EnhancedInstallment = InstallmentDetail & { loanId: string; clientName: str
 
 const InstallmentReportModal: React.FC<{isOpen: boolean, onClose: () => void, loans: Loan[], clients: Client[]}> = ({isOpen, onClose, loans, clients}) => {
     const reportRef = useRef<HTMLDivElement>(null);
-    const [filters, setFilters] = useState({ clientId: 'all', startDate: '', endDate: '' });
+    const [filters, setFilters] = useState({ clientIds: [] as string[], startDate: '', endDate: '' });
     const [viewType, setViewType] = useState<'upcoming' | 'period'>('upcoming');
 
     const { overdue, upcoming, paid, totals } = useMemo(() => {
@@ -654,7 +935,7 @@ const InstallmentReportModal: React.FC<{isOpen: boolean, onClose: () => void, lo
             })));
         
         const filtered = flattened.filter(i => {
-             const clientMatch = filters.clientId === 'all' || i.clientId === filters.clientId;
+             const clientMatch = filters.clientIds.length === 0 || filters.clientIds.includes(i.clientId);
              const dueDate = new Date(i.due_date.split('T')[0] + 'T00:00:00');
              const dateMatch = (!filters.startDate || dueDate >= new Date(filters.startDate + 'T00:00:00')) &&
                               (!filters.endDate || dueDate <= new Date(filters.endDate + 'T23:59:59'));
@@ -693,17 +974,7 @@ const InstallmentReportModal: React.FC<{isOpen: boolean, onClose: () => void, lo
         return { overdue, upcoming, paid, totals };
     }, [loans, filters, viewType]);
 
-    const handlePrint = () => {
-        const printContent = reportRef.current;
-        if (printContent) {
-            const WinPrint = window.open('', '', 'left=0,top=0,width=800,height=900,toolbar=0,scrollbars=0,status=0');
-            WinPrint?.document.write(`<html><head><title>Relatório de Parcelas</title><style>body{font-family:sans-serif;}.print-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; } .print-table th, .print-table td { border: 1px solid #ddd; padding: 8px; text-align: left; } .print-table th { background-color: #f2f2f2; } h3 { font-size: 1.2em; margin-bottom: 10px; }</style></head><body>${printContent.innerHTML}</body></html>`);
-            WinPrint?.document.close();
-            WinPrint?.focus();
-            WinPrint?.print();
-            WinPrint?.close();
-        }
-    }
+    const handlePrint = () => printReport(reportRef, 'Relatório de Parcelas');
     
     return (
         <Modal isOpen={isOpen} onClose={onClose} title="Controle de Parcelas" size='2xl' footer={
@@ -795,12 +1066,13 @@ const InstallmentSection: React.FC<{title: string, installments: EnhancedInstall
 }
 
 const ModalitySummaryReportModal: React.FC<{isOpen: boolean, onClose: () => void, loans: Loan[], clients: Client[]}> = ({isOpen, onClose, loans, clients}) => {
-    const [filters, setFilters] = useState({ clientId: 'all', startDate: '', endDate: '' });
+    const reportRef = useRef<HTMLDivElement>(null);
+    const [filters, setFilters] = useState({ clientIds: [] as string[], startDate: '', endDate: '' });
 
     const summary = useMemo(() => {
         const filteredLoans = loans.filter(l => {
             if (l.is_archived || l.status === 'paid') return false;
-            const clientMatch = filters.clientId === 'all' || l.clientId === filters.clientId;
+            const clientMatch = filters.clientIds.length === 0 || filters.clientIds.includes(l.clientId);
             const dateMatch = (!filters.startDate || new Date(l.date) >= new Date(filters.startDate + 'T00:00:00')) &&
                               (!filters.endDate || new Date(l.date) <= new Date(filters.endDate + 'T23:59:59'));
             return clientMatch && dateMatch;
@@ -865,6 +1137,8 @@ const ModalitySummaryReportModal: React.FC<{isOpen: boolean, onClose: () => void
 
     }, [loans, filters]);
     
+    const handlePrint = () => printReport(reportRef, 'Relatório de Resumo por Modalidade');
+
     const SummarySection: React.FC<{title: string, stats: any}> = ({title, stats}) => (
         <Card>
             <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100 mb-3">{title}</h3>
@@ -879,9 +1153,13 @@ const ModalitySummaryReportModal: React.FC<{isOpen: boolean, onClose: () => void
     );
 
     return (
-        <Modal isOpen={isOpen} onClose={onClose} title="Resumo por Modalidade" size="2xl">
+        <Modal isOpen={isOpen} onClose={onClose} title="Resumo por Modalidade" size="2xl" footer={
+            <div className="flex justify-end">
+                <Button onClick={handlePrint}>Imprimir Relatório</Button>
+            </div>
+        }>
             <ReportFilters clients={clients} onFilterChange={setFilters} />
-            <div className="space-y-4">
+            <div className="space-y-4 printable-report" ref={reportRef}>
                 <SummarySection title="Pagamento Único" stats={summary.pagUnico} />
                 <SummarySection title="Juros Mensal" stats={summary.jurosMensal} />
                 <SummarySection title="Parcelado" stats={summary.parcelado} />
@@ -892,6 +1170,7 @@ const ModalitySummaryReportModal: React.FC<{isOpen: boolean, onClose: () => void
 
 
 const DeletionHistoryModal: React.FC<{isOpen: boolean, onClose: () => void, history: DeletionRecord[]}> = ({isOpen, onClose, history}) => {
+    const reportRef = useRef<HTMLDivElement>(null);
     const [filter, setFilter] = useState<'all' | 'loan' | 'client' | 'account'>('all');
 
     const filteredHistory = useMemo(() => {
@@ -900,6 +1179,8 @@ const DeletionHistoryModal: React.FC<{isOpen: boolean, onClose: () => void, hist
             .sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     }, [history, filter]);
     
+    const handlePrint = () => printReport(reportRef, 'Relatório de Histórico de Exclusões');
+
     const typeConfig = {
         loan: { text: 'Empréstimo', icon: <BanknoteIcon />, color: 'text-blue-500'},
         client: { text: 'Cliente', icon: <UserCircleIcon />, color: 'text-purple-500' },
@@ -907,7 +1188,11 @@ const DeletionHistoryModal: React.FC<{isOpen: boolean, onClose: () => void, hist
     }
 
     return (
-        <Modal isOpen={isOpen} onClose={onClose} title="Histórico de Exclusões" size="2xl">
+        <Modal isOpen={isOpen} onClose={onClose} title="Histórico de Exclusões" size="2xl" footer={
+            <div className="flex justify-end">
+                <Button onClick={handlePrint}>Imprimir Relatório</Button>
+            </div>
+        }>
             <div className="flex justify-center space-x-2 mb-6">
                 {(['all', 'loan', 'client', 'account'] as const).map(f => (
                     <Button key={f} variant={filter === f ? 'primary' : 'secondary'} onClick={() => setFilter(f)} className="capitalize !text-sm !px-3 !py-1">
@@ -915,7 +1200,7 @@ const DeletionHistoryModal: React.FC<{isOpen: boolean, onClose: () => void, hist
                     </Button>
                 ))}
             </div>
-            <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
+            <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2 printable-report" ref={reportRef}>
                 {filteredHistory.length > 0 ? filteredHistory.map((record, index) => (
                     <div key={index} className="flex items-start space-x-4 p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
                         <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${typeConfig[record.type].color}`}>
@@ -936,3 +1221,126 @@ const DeletionHistoryModal: React.FC<{isOpen: boolean, onClose: () => void, hist
         </Modal>
     );
 };
+
+// --- New Account Statement Report ---
+interface StatementItem {
+    date: string;
+    description: string;
+    credit: number;
+    debit: number;
+    balance: number;
+}
+const AccountStatementReportModal: React.FC<{
+    isOpen: boolean;
+    onClose: () => void;
+    accounts: Account[];
+    transactions: Transaction[];
+}> = ({ isOpen, onClose, accounts, transactions }) => {
+    const reportRef = useRef<HTMLDivElement>(null);
+    const [selectedAccountId, setSelectedAccountId] = useState(accounts.length > 0 ? accounts[0].id : '');
+
+    useEffect(() => {
+        if (isOpen && !selectedAccountId && accounts.length > 0) {
+            setSelectedAccountId(accounts[0].id);
+        }
+    }, [isOpen, accounts, selectedAccountId]);
+    
+    const { statementItems, initialBalance, finalBalance, selectedAccount } = useMemo(() => {
+        if (!selectedAccountId) return { statementItems: [], initialBalance: 0, finalBalance: 0, selectedAccount: null };
+
+        const account = accounts.find(a => a.id === selectedAccountId);
+        if (!account) return { statementItems: [], initialBalance: 0, finalBalance: 0, selectedAccount: null };
+
+        const accountTransactions = transactions
+            .filter(t => t.accountId === selectedAccountId)
+            .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+        let runningBalance = account.initial_balance;
+        const items: StatementItem[] = accountTransactions.map(t => {
+            const credit = t.type === 'credit' ? t.amount : 0;
+            const debit = t.type === 'debit' ? t.amount : 0;
+            runningBalance += credit - debit;
+            return { date: t.date, description: t.description, credit, debit, balance: runningBalance };
+        });
+
+        return { statementItems: items, initialBalance: account.initial_balance, finalBalance: runningBalance, selectedAccount: account };
+    }, [selectedAccountId, accounts, transactions]);
+
+    const handlePrint = () => printReport(reportRef, `Extrato da Conta: ${selectedAccount?.name || ''}`);
+
+    const thStyle = "px-2 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider dark:text-gray-300";
+
+    return (
+        <Modal isOpen={isOpen} onClose={onClose} title="Extrato por Conta" size='2xl' footer={
+            <div className="flex justify-between items-center w-full">
+                <div className="text-sm">
+                    <span className="text-gray-500 dark:text-gray-400">Saldo Final: </span>
+                    <span className={`font-bold ${finalBalance >= 0 ? 'text-gray-800 dark:text-gray-100' : 'text-red-600'}`}>{formatCurrency(finalBalance)}</span>
+                </div>
+                <Button onClick={handlePrint}>Imprimir Relatório</Button>
+            </div>
+        }>
+            <div className="p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg mb-6">
+                <label htmlFor="accountStatementFilter" className="block text-sm font-medium text-gray-700 dark:text-gray-300">Selecione a Conta</label>
+                <select id="accountStatementFilter" value={selectedAccountId} onChange={e => setSelectedAccountId(e.target.value)} className={inputStyle}>
+                    {accounts.filter(a => !a.is_archived).map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
+                </select>
+            </div>
+            <div className="printable-report" ref={reportRef}>
+                {selectedAccount ? (
+                    <>
+                        <div className="mb-4 p-3 bg-indigo-50 dark:bg-indigo-900/30 rounded-lg flex justify-between items-center">
+                            <h4 className="font-bold text-indigo-800 dark:text-indigo-200">Saldo Inicial</h4>
+                            <span className="font-bold text-lg text-indigo-800 dark:text-indigo-200">{formatCurrency(initialBalance)}</span>
+                        </div>
+                        {/* Mobile View */}
+                        <div className="sm:hidden space-y-3">
+                            {statementItems.map((item, index) => (
+                                <div key={index} className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded-lg shadow">
+                                    <div className="flex justify-between items-start">
+                                        <p className="font-medium text-sm pr-2">{item.description}</p>
+                                        <p className={`font-semibold text-sm ${item.credit > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                            {formatCurrency(item.credit > 0 ? item.credit : -item.debit)}
+                                        </p>
+                                    </div>
+                                    <div className="flex justify-between items-end text-xs mt-2 pt-2 border-t dark:border-gray-600">
+                                        <p className="text-gray-500">{formatDateForBrasilia(item.date)}</p>
+                                        <p>Saldo: <span className="font-semibold">{formatCurrency(item.balance)}</span></p>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                        {/* Desktop View */}
+                        <div className="overflow-x-auto hidden sm:block">
+                            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                                <thead className="bg-gray-50 dark:bg-gray-700/50">
+                                    <tr>
+                                        <th className={thStyle}>Data</th>
+                                        <th className={thStyle}>Descrição</th>
+                                        <th className={`${thStyle} text-right`}>Crédito</th>
+                                        <th className={`${thStyle} text-right`}>Débito</th>
+                                        <th className={`${thStyle} text-right`}>Saldo</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                                    {statementItems.map((item, index) => (
+                                        <tr key={index}>
+                                            <td className="px-2 sm:px-6 py-3 text-sm">{formatDateForBrasilia(item.date)}</td>
+                                            <td className="px-2 sm:px-6 py-3 text-sm font-medium">{item.description}</td>
+                                            <td className="px-2 sm:px-6 py-3 text-sm text-right text-green-500">{item.credit > 0 ? formatCurrency(item.credit) : '-'}</td>
+                                            <td className="px-2 sm:px-6 py-3 text-sm text-right text-red-500">{item.debit > 0 ? formatCurrency(item.debit) : '-'}</td>
+                                            <td className="px-2 sm:px-6 py-3 text-sm text-right font-semibold">{formatCurrency(item.balance)}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                        {statementItems.length === 0 && <p className="text-center py-4 text-gray-500">Nenhuma transação encontrada para esta conta.</p>}
+                    </>
+                ) : (
+                    <p className="text-center py-4 text-gray-500">Selecione uma conta para visualizar o extrato.</p>
+                )}
+            </div>
+        </Modal>
+    );
+}
